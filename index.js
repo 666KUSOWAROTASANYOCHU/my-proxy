@@ -38,7 +38,8 @@ app.use('/proxy/:targetUrl(*)', (req, res, next) => {
 
                     // セキュリティヘッダーを無効化するスクリプトを注入
                     $('head').append('<script>window.onbeforeunload = null; Object.defineProperty(navigator, "webdriver", {get: () => undefined});</script>');
-                    
+                    // HTML内の「/search」とか「/style.css」を「/proxy/https://相手/search」に強制置換
+                    html = html.replace(/(href|src)="\/(?!\/)/g, `$1="/proxy/${origin}/`);
                     res.send($.html());
                 } else {
                     res.end(body);
