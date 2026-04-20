@@ -1,47 +1,52 @@
 const express = require('express');
 const { createProxyMiddleware } = require('http-proxy-middleware');
+const cheerio = require('cheerio');
 
 const app = express();
 
-// 1. メインのプロキシ設定
-const proxy = createProxyMiddleware({
-    target: 'https://www.google.com', // デフォルト
-    changeOrigin: true,
-    router: (req) => {
-        // URLに /proxy/http... が含まれていたら、そこをターゲットにする
-        if (req.url.includes('/proxy/')) {
-            const url = req.url.split('/proxy/')[1];
-            return url.startsWith('http') ? url : 'https://' + url;
+app.use('/proxy/:targetUrl(*)', (req, res, next) => {
+    const targetUrl = req.params.targetUrl;
+    const origin = new URL(targetUrl).origin;
+
+    createProxyMiddleware({
+        target: targetUrl,
+        changeOrigin: true,
+        followRedirects: true,
+        onProxyReq: (proxyReq) => {
+            // 【偽装】ブラウザのフリをする
+            proxyReq.setHeader('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36');
+            proxyReq.setHeader('Accept-Language', 'ja,en-US;q=0.9,en;q=0.8');
+        },
+        selfHandleResponse: true, // レスポンスを自分で加工する
+        onProxyRes: async (proxyRes, req, res) => {
+            let body = Buffer.from([]);
+            proxyRes.on('data', (data) => { body = Buffer.concat([body, data]); });
+            proxyRes.on('end', () => {
+                const contentType = proxyRes.headers['content-type'];
+                if (contentType && contentType.includes('text/html')) {
+                    // 【改造】HTMLを書き換えて「別タブ移動」などを阻止する
+                    let html = body.toString();
+                    const $ = cheerio.load(html);
+                    
+                    // リンクをすべてプロキシ経由に書き換える（力技）
+                    $('a').each((i, el) => {
+                        const href = $(el).attr('href');
+                        if (href && href.startsWith('http')) {
+                            $(el).attr('href', `/proxy/${href}`);
+                        }
+                    });
+
+                    // セキュリティヘッダーを無効化するスクリプトを注入
+                    $('head').append('<script>window.onbeforeunload = null; Object.defineProperty(navigator, "webdriver", {get: () => undefined});</script>');
+                    
+                    res.send($.html());
+                } else {
+                    res.end(body);
+                }
+            });
         }
-    },
-    pathRewrite: (path, req) => {
-        // /proxy/http... という文字を消して、相手サイトにリクエストを送る
-        return path.replace(/\/proxy\/https?:\/\/[^/]+/, '') || '/';
-    },
-    onProxyRes: (proxyRes, req, res) => {
-        delete proxyRes.headers['x-frame-options'];
-        delete proxyRes.headers['content-security-policy'];
-    }
+    })(req, res, next);
 });
 
-// 2. すべてのリクエストをプロキシに放り込む
-app.use('/proxy/:targetUrl(*)', proxy);
-
-// 3. /proxy を通らない「はぐれリクエスト（/search など）」を救済する
-app.use((req, res, next) => {
-    if (req.url !== '/' && !req.url.startsWith('/proxy/')) {
-        console.log("救済リクエスト:", req.url);
-        // 直前のページ（Referer）を見て、どこから来たか推測してプロキシし直す
-        // ※これが簡易プロキシの限界ですが、検索などはこれで動く確率が上がります
-        res.redirect(307, `/proxy/https://www.google.com${req.url}`);
-    } else {
-        next();
-    }
-});
-
-app.get('/', (req, res) => {
-    res.send('動的プロキシ起動中！末尾に /proxy/https://... を付けてね');
-});
-
-const PORT = process.env.PORT || 10000;
-app.listen(PORT);
+app.get('/', (req, res) => res.send('最強版プロキシ起動中！'));
+app.listen(process.env.PORT || 10000);
