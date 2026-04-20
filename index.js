@@ -3,37 +3,44 @@ const { createProxyMiddleware } = require('http-proxy-middleware');
 
 const app = express();
 
-app.use('/proxy/:targetUrl(*)', (req, res, next) => {
-    const targetUrl = req.params.targetUrl;
-    
-    if (!targetUrl || !targetUrl.startsWith('http')) {
-        return res.status(400).send('URLは /proxy/https://... の形式で入力してね。');
-    }
-
-    createProxyMiddleware({
-        target: targetUrl,
-        changeOrigin: true,
-        secure: false, // SSL証明書の検証を甘くする
-        followRedirects: true,
-        cookieDomainRewrite: "", // クッキーを自分のドメインに書き換える
-        onProxyRes: (proxyRes, req, res) => {
-            // YouTubeなどの「別のタブで開け」「他所で表示するな」という命令を削除
-            delete proxyRes.headers['x-frame-options'];
-            delete proxyRes.headers['content-security-policy'];
-            delete proxyRes.headers['content-security-policy-report-only'];
-            
-            // CORS（違うドメイン同士の通信）を許可する設定を追加
-            res.setHeader('Access-Control-Allow-Origin', '*');
-            res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,DELETE,OPTIONS');
-        },
-        pathRewrite: (path) => {
-            return ''; 
+// 1. メインのプロキシ設定
+const proxy = createProxyMiddleware({
+    target: 'https://www.google.com', // デフォルト
+    changeOrigin: true,
+    router: (req) => {
+        // URLに /proxy/http... が含まれていたら、そこをターゲットにする
+        if (req.url.includes('/proxy/')) {
+            const url = req.url.split('/proxy/')[1];
+            return url.startsWith('http') ? url : 'https://' + url;
         }
-    })(req, res, next);
+    },
+    pathRewrite: (path, req) => {
+        // /proxy/http... という文字を消して、相手サイトにリクエストを送る
+        return path.replace(/\/proxy\/https?:\/\/[^/]+/, '') || '/';
+    },
+    onProxyRes: (proxyRes, req, res) => {
+        delete proxyRes.headers['x-frame-options'];
+        delete proxyRes.headers['content-security-policy'];
+    }
+});
+
+// 2. すべてのリクエストをプロキシに放り込む
+app.use('/proxy/:targetUrl(*)', proxy);
+
+// 3. /proxy を通らない「はぐれリクエスト（/search など）」を救済する
+app.use((req, res, next) => {
+    if (req.url !== '/' && !req.url.startsWith('/proxy/')) {
+        console.log("救済リクエスト:", req.url);
+        // 直前のページ（Referer）を見て、どこから来たか推測してプロキシし直す
+        // ※これが簡易プロキシの限界ですが、検索などはこれで動く確率が上がります
+        res.redirect(307, `/proxy/https://www.google.com${req.url}`);
+    } else {
+        next();
+    }
 });
 
 app.get('/', (req, res) => {
-    res.send('動的プロキシ起動中！末尾に /proxy/https://www.youtube.com などを付けてね。');
+    res.send('動的プロキシ起動中！末尾に /proxy/https://... を付けてね');
 });
 
 const PORT = process.env.PORT || 10000;
